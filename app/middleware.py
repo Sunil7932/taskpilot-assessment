@@ -15,6 +15,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+from app.logging_config import request_id_ctx
+
 logger = logging.getLogger("taskpilot.request")
 
 
@@ -22,23 +24,25 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
         request.state.request_id = request_id
+        token = request_id_ctx.set(request_id)
         start = time.perf_counter()
 
         try:
             response = await call_next(request)
         except Exception:
-            # The exception handlers produce the response; still log the attempt.
+            # The exception handlers produce the response; still log the attempt
+            # (the request id is injected from the still-set contextvar).
             elapsed_ms = (time.perf_counter() - start) * 1000
             logger.exception(
                 "request_failed",
                 extra={
-                    "request_id": request_id,
                     "method": request.method,
                     "path": request.url.path,
                     "status_code": 500,
                     "latency_ms": round(elapsed_ms, 2),
                 },
             )
+            request_id_ctx.reset(token)
             raise
 
         elapsed_ms = (time.perf_counter() - start) * 1000
@@ -46,11 +50,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         logger.info(
             "request",
             extra={
-                "request_id": request_id,
                 "method": request.method,
                 "path": request.url.path,
                 "status_code": response.status_code,
                 "latency_ms": round(elapsed_ms, 2),
             },
         )
+        request_id_ctx.reset(token)
         return response

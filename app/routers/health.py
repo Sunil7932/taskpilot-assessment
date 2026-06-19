@@ -14,11 +14,19 @@ logger = logging.getLogger("taskpilot.health")
 router = APIRouter(tags=["health"])
 
 
+@router.get("/health/live")
+async def liveness() -> dict[str, str]:
+    """Liveness: is the process up? No dependencies — never fails on DB outage,
+    so an orchestrator won't kill a healthy pod just because the DB blipped.
+    """
+    return {"status": "ok"}
+
+
 @router.get("/health")
-async def health(
+async def readiness(
     response: Response, session: AsyncSession = Depends(get_session)
 ) -> dict[str, str]:
-    """Liveness + DB readiness in one probe."""
+    """Readiness: can we serve traffic? Probes DB connectivity."""
     try:
         await session.execute(text("SELECT 1"))
     except Exception:

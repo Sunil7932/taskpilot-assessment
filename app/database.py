@@ -20,10 +20,15 @@ class Base(DeclarativeBase):
 
 _settings = get_settings()
 
-# pool_pre_ping avoids handing out dead connections after a DB restart.
+# pool_pre_ping avoids handing out dead connections after a DB restart;
+# pool_recycle proactively retires long-lived ones. Sizes are configurable.
 engine = create_async_engine(
     _settings.database_url,
     pool_pre_ping=True,
+    pool_size=_settings.db_pool_size,
+    max_overflow=_settings.db_max_overflow,
+    pool_timeout=_settings.db_pool_timeout_seconds,
+    pool_recycle=_settings.db_pool_recycle_seconds,
     future=True,
 )
 
