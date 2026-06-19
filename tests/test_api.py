@@ -132,3 +132,22 @@ async def test_different_idempotency_keys_create_distinct_tasks(client):
     a = await client.post("/tasks", json={"title": "t", "idempotency_key": "k1"})
     b = await client.post("/tasks", json={"title": "t", "idempotency_key": "k2"})
     assert a.json()["id"] != b.json()["id"]
+
+
+async def test_metrics_endpoint_exposes_prometheus(client):
+    resp = await client.get("/metrics", headers={"X-API-Key": ""})
+    assert resp.status_code == 200
+    assert "taskpilot_http_requests_total" in resp.text
+
+
+async def test_create_increments_created_counter(client):
+    await client.post("/tasks", json={"title": "counted"})
+    resp = await client.get("/metrics", headers={"X-API-Key": ""})
+    assert "taskpilot_tasks_created_total" in resp.text
+
+
+async def test_oversized_request_body_rejected_with_413(client):
+    huge = {"title": "x", "payload": {"blob": "a" * 1_100_000}}  # > 1 MiB
+    resp = await client.post("/tasks", json=huge)
+    assert resp.status_code == 413
+    assert resp.json()["error"]["code"] == "payload_too_large"

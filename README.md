@@ -60,6 +60,10 @@ curl "localhost:8000/tasks?status=pending&limit=20&offset=0" -H "X-API-Key: $KEY
 # liveness (no DB) vs readiness (probes DB) — both unauthenticated
 curl localhost:8000/health/live
 curl localhost:8000/health
+
+# Prometheus metrics — API process, and the worker on its own port
+curl localhost:8000/metrics
+curl localhost:9100/metrics
 ```
 
 Interactive API docs: http://localhost:8000/docs
@@ -187,7 +191,7 @@ a PATCH racing the worker) can't clobber each other.
 - **Partition** the `tasks` table (by created_at/status) and **archive** terminal tasks (`succeeded`/`dead`) to cold storage so the active set stays small.
 - Serve `GET /tasks` from **read replicas**; keep claims on the primary.
 - Add **jitter** to backoff to avoid retry stampedes, and per-tenant **rate limiting**/quotas.
-- Add **observability**: metrics (claim latency, queue depth, retry/dead rates), tracing, and alerting on DLQ growth.
+- Extend **observability**: Prometheus `/metrics` already ship (request + task outcome counters); next add distributed **tracing**, Grafana dashboards, and alerting on DLQ/retry-rate growth and queue depth.
 - Split the dead-letter path into its own store/queue with replay tooling for operators.
 
 ---
@@ -208,6 +212,8 @@ a PATCH racing the worker) can't clobber each other.
 - **No secrets in the repo**: `.env` git-ignored; everything env-configurable (`.env.example` documents every variable).
 
 **Operability**
+- **Prometheus metrics**: the API serves `/metrics` (request count/latency by route, tasks created); the worker — a separate process — exposes its own metrics on `:9100` (tasks succeeded/retried/dead-lettered/reclaimed). Endpoint labels use the route template so cardinality stays bounded.
+- **Request-body guard**: requests over `MAX_REQUEST_BYTES` are rejected with `413` before the body is read (bounds memory).
 - **Liveness** (`/health/live`, no deps) vs **readiness** (`/health`, probes DB) — so an orchestrator won't kill a healthy pod over a transient DB blip. The worker exposes a **heartbeat-file healthcheck**.
 - **Graceful shutdown**: worker traps SIGTERM/SIGINT, finishes the in-flight tick, disposes the engine (`stop_grace_period: 30s`); uvicorn drains on signal.
 - **Structured JSON logs** with a request-id **contextvar** so every log line in a request (not just the access log) is correlated; generic client errors, never leaking stack traces/SQL.
@@ -220,7 +226,6 @@ a PATCH racing the worker) can't clobber each other.
 
 - **No DLQ table** — a `dead` status is enough at this size (documented above).
 - **No update/edit endpoint** beyond status — not in the spec; tasks are created then driven by the worker.
-- **No metrics endpoint (Prometheus)** — logs cover it at this size; called out in the scale section as the next step.
 - The optional frontend is deliberately minimal (polling, no client cache library) — the brief rewards state-management restraint.
 
 ---
