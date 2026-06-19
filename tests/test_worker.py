@@ -11,6 +11,7 @@ import pytest
 from app.config import get_settings
 from app.models import Task, TaskStatus
 from app.worker.processing import backoff_delay_seconds, reclaim_stale_running, run_once
+from app.worker.runner import run_loop
 
 
 @pytest.fixture
@@ -93,6 +94,35 @@ def test_backoff_is_exponential():
     assert backoff_delay_seconds(1, 60) == 60
     assert backoff_delay_seconds(2, 60) == 120
     assert backoff_delay_seconds(3, 60) == 240
+
+
+async def test_succeeded_increments_processed_metric(session_factory, settings):
+    from prometheus_client import REGISTRY
+
+    def succeeded_count() -> float:
+        return (
+            REGISTRY.get_sample_value("taskpilot_tasks_processed_total", {"outcome": "succeeded"})
+            or 0.0
+        )
+
+    before = succeeded_count()
+    await _insert(session_factory)
+    await run_once(session_factory, settings)
+    assert succeeded_count() == before + 1
+
+
+async def test_run_loop_processes_then_stops_gracefully(session_factory, settings):
+    # The in-process worker (app lifespan) uses this same loop. A short poll
+    # interval lets one tick run; then we signal stop and the loop must exit.
+    fast = settings.model_copy(update={"worker_poll_interval_seconds": 60})
+    task_id = await _insert(session_factory)
+    stop = asyncio.Event()
+    loop_task = asyncio.create_task(run_loop(stop, session_factory, fast))
+    await asyncio.sleep(1.0)  # allow the immediate first tick to process the task
+    stop.set()
+    await asyncio.wait_for(loop_task, timeout=5)  # graceful, prompt shutdown
+    task = await _get(session_factory, task_id)
+    assert task.status == TaskStatus.succeeded
 
 
 async def test_execution_timeout_is_treated_as_failure(session_factory, settings):

@@ -22,8 +22,8 @@ docker compose up --build
 That single command:
 1. starts **PostgreSQL** and waits until it is healthy,
 2. runs a one-shot **migrate** service (`alembic upgrade head`) to create the schema,
-3. starts the **API** on http://localhost:8000 (health-checked), and
-4. starts the **worker**, which scans for due tasks every 60s.
+3. starts the **API** on http://localhost:8000 (health-checked), which also runs
+   the **worker** in-process (it scans for due tasks every 60s).
 
 The API requires an `X-API-Key` header. The default dev key is
 `change-me-in-production` (override via a `.env` file — see `.env.example`).
@@ -61,9 +61,8 @@ curl "localhost:8000/tasks?status=pending&limit=20&offset=0" -H "X-API-Key: $KEY
 curl localhost:8000/health/live
 curl localhost:8000/health
 
-# Prometheus metrics — API process, and the worker on its own port
+# Prometheus metrics — HTTP + task-outcome counters (worker runs in-process)
 curl localhost:8000/metrics
-curl localhost:9100/metrics
 ```
 
 Interactive API docs: http://localhost:8000/docs
@@ -95,33 +94,34 @@ CI runs lint (ruff + black + mypy) → tests (against a Postgres service, incl.
 
 ```
                          X-API-Key
-   other services ───────────────────▶ ┌─────────────────┐
-   (HTTP clients)                       │   FastAPI API   │
-                                        │  /tasks /health │
-   ┌──────────────┐   poll every 60s    │ Pydantic + auth │
-   │  Next.js UI  │──▶ (server proxy) ──▶│  + logging mw   │
-   └──────────────┘                     └────────┬────────┘
-                                                  │ async SQLAlchemy
+   other services ───────────────────▶ ┌──────────────────────────────┐
+   (HTTP clients)                       │       API container          │
+                                        │  ┌────────────────────────┐  │
+   ┌──────────────┐  poll (server proxy)│  │  FastAPI  /tasks /health│  │
+   │  Next.js UI  │──────────────────▶  │  │  Pydantic + auth + logs │  │
+   └──────────────┘                     │  └───────────┬────────────┘  │
+                                        │  ┌───────────┴────────────┐  │
+                                        │  │ in-process worker loop  │  │
+                                        │  │ (asyncio, every 60s)    │  │
+                                        │  └───────────┬────────────┘  │
+                                        └──────────────┼───────────────┘
+                                            async SQLAlchemy │
                                                   ▼
                                         ┌─────────────────┐
-                                        │   PostgreSQL    │
-                                        │   tasks table   │
-                                        └────────▲────────┘
-                                                  │ SELECT ... FOR UPDATE
-                                                  │ SKIP LOCKED  (claim)
-                                        ┌────────┴────────┐
-                                        │     Worker      │  execute → succeed
-                                        │  asyncio loop   │  or fail → retry
-                                        │  (own process)  │  (backoff) → dead
-                                        └─────────────────┘
+                                        │   PostgreSQL    │  claim via
+                                        │   tasks table   │  SELECT ... FOR
+                                        └─────────────────┘  UPDATE SKIP LOCKED
+                                          execute → succeed | retry(backoff) → dead
 ```
 
 The **API** is a thin, async FastAPI app: Pydantic validates every request, a
 middleware logs each request (method, path, status, latency, request id), and a
-single exception layer returns a consistent error envelope. The **worker** is a
-separate process running the same image; every 60s it atomically claims due
-`pending` tasks, executes them outside any lock, and records the outcome
-(succeeded / retry-with-backoff / dead). State lives entirely in Postgres, so the
+single exception layer returns a consistent error envelope. Per §5.1, the
+**worker runs inside the API container** as an `asyncio` background task started
+in the app lifespan; every 60s it atomically claims due `pending` tasks, executes
+them outside any lock, and records the outcome (succeeded / retry-with-backoff /
+dead). It can also be split into its own process for independent scaling
+(`RUN_WORKER=false` + `python -m app.worker.worker`). State lives entirely in Postgres, so the
 API and worker share no in-memory state and can be scaled independently.
 
 ### Project layout
@@ -139,7 +139,7 @@ app/
   errors.py          error envelope + exception handlers
   middleware.py      request-logging middleware
   routers/           tasks + health endpoints
-  worker/            executor, claim/process logic, asyncio loop entrypoint
+  worker/            executor, claim/process logic, shared loop, standalone entrypoint
 alembic/             async migration env + initial schema
 tests/               API, state-machine, and worker tests (real Postgres)
 frontend/            Next.js dashboard (optional bonus)
@@ -155,7 +155,7 @@ task_service_fixed.py + CODE_REVIEW.md   §7 review exercise
 | **Database** | PostgreSQL | `SELECT ... FOR UPDATE SKIP LOCKED` gives correct multi-worker task claiming out of the box — SQLite can't, and we need real concurrency. |
 | **ID** | UUID v4 (server-generated) | Globally unique without DB coordination and non-sequential, so task ids can't be enumerated (mitigates IDOR). |
 | **Auth** | API key in `X-API-Key` (timing-safe compare) | This is an internal service-to-service API; a shared secret is the simplest correct control — no need for OAuth/JWT. |
-| **Worker** | Plain `asyncio` polling loop, separate process | Exactly one periodic job; a bare loop is the lightest thing that works — zero extra deps, no broker, trivial graceful shutdown. |
+| **Worker** | Plain `asyncio` loop, in the API container (§5.1) | Exactly one periodic job; a bare loop is the lightest thing that works — zero extra deps, no broker, trivial graceful shutdown. Runs in-process per the brief; can be split out (`RUN_WORKER=false`) to scale independently. |
 | **Backoff** | Exponential (`base · 2^attempt`, base 60s) | Flaky downstreams recover better when not hammered; exponential spacing (60s → 120s → 240s) backs off fast without extra infra. |
 | **Concurrency** | `FOR UPDATE SKIP LOCKED` claim, status flipped to `running` in one txn | Multiple workers run the same claim query and each gets a disjoint row set, so no task is ever executed twice; execution happens outside the lock so slow I/O doesn't hold rows. |
 | **Dead-letter** | `status = 'dead'` on the same table | A separate DLQ table adds migration/ops overhead with no benefit at this scale; a terminal status is queryable and simple. Easy to split out later. |
@@ -181,7 +181,7 @@ a PATCH racing the worker) can't clobber each other.
 ## What I'd change at scale
 
 **~10× traffic** (the polling design still holds):
-- Run **multiple worker replicas** — `SKIP LOCKED` already makes this safe; no code change, just `docker compose up --scale worker=N`.
+- **Split the worker out and scale it** — set `RUN_WORKER=false` on the API and run N standalone workers (`python -m app.worker.worker`); `SKIP LOCKED` already makes concurrent claiming safe, so no code change is needed.
 - Tune `WORKER_BATCH_SIZE` and pool sizes; the `(status, scheduled_at)` index already supports the claim query.
 - Shorten the poll interval or add Postgres **`LISTEN/NOTIFY`** so newly-due tasks start sooner than the next 60s tick.
 - Add **idempotency keys** on create so retried client requests don't duplicate jobs.
@@ -212,7 +212,7 @@ a PATCH racing the worker) can't clobber each other.
 - **No secrets in the repo**: `.env` git-ignored; everything env-configurable (`.env.example` documents every variable).
 
 **Operability**
-- **Prometheus metrics**: the API serves `/metrics` (request count/latency by route, tasks created); the worker — a separate process — exposes its own metrics on `:9100` (tasks succeeded/retried/dead-lettered/reclaimed). Endpoint labels use the route template so cardinality stays bounded.
+- **Prometheus metrics**: `/metrics` exposes request count/latency by route template **and** task outcomes (created/succeeded/retried/dead-lettered/reclaimed) — the in-process worker shares the API registry. When run standalone, the worker serves its own metrics on `:9100`. Endpoint labels use the route template so cardinality stays bounded.
 - **Request-body guard**: requests over `MAX_REQUEST_BYTES` are rejected with `413` before the body is read (bounds memory).
 - **Liveness** (`/health/live`, no deps) vs **readiness** (`/health`, probes DB) — so an orchestrator won't kill a healthy pod over a transient DB blip. The worker exposes a **heartbeat-file healthcheck**.
 - **Graceful shutdown**: worker traps SIGTERM/SIGINT, finishes the in-flight tick, disposes the engine (`stop_grace_period: 30s`); uvicorn drains on signal.
