@@ -26,6 +26,13 @@ line-length = 100
 target-version = ["py312"]
 extend-exclude = "alembic/versions"
 
+[tool.mypy]
+python_version = "3.12"
+files = ["app"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
