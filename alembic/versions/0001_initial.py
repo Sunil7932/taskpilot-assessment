@@ -20,6 +20,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # create_type=False: we create the enum explicitly below (idempotent via
+    # checkfirst), so create_table must not emit a second CREATE TYPE.
     task_status = postgresql.ENUM(
         "pending",
         "running",
@@ -27,6 +29,7 @@ def upgrade() -> None:
         "failed",
         "dead",
         name="task_status",
+        create_type=False,
     )
     task_status.create(op.get_bind(), checkfirst=True)
 
