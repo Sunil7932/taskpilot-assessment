@@ -209,6 +209,11 @@ docker compose --profile frontend up --build   # then open http://localhost:3000
 | `GET` | `/health/live` | Liveness — is the process up. (no auth) |
 | `GET` | `/metrics` | Prometheus metrics. (no auth) |
 
+> The three `ops` endpoints (`/health`, `/health/live`, `/metrics`) are
+> infrastructure, not part of the business API. `/metrics` is deliberately
+> excluded from the OpenAPI schema (`include_in_schema=False`), so it won't appear
+> in Swagger at `/docs` — but it works: `curl localhost:8000/metrics`.
+
 **Errors** always look the same — never a raw stack trace:
 ```json
 { "error": { "code": "validation_error", "message": "title: must not be blank" } }
