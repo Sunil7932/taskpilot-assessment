@@ -2,9 +2,29 @@
 # Brings up Postgres, applies migrations, then starts the API + worker.
 # All settings fall back to safe local defaults; override via a .env file.
 
+# --- shared building blocks ------------------------------------------------
+x-common-env: &common-env
+  DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://taskpilot:taskpilot@db:5432/taskpilot}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  ENVIRONMENT: ${ENVIRONMENT:-development}
+  # Shared across the one deployment (same app image). Required by the
+  # production settings guard, which runs in every process that loads config.
+  API_KEY: ${API_KEY:-change-me-in-production}
+
+# Container hardening applied to every app service.
+x-hardening: &hardening
+  init: true # PID-1 that forwards signals and reaps zombies
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  read_only: true # immutable root fs...
+  tmpfs:
+    - /tmp # ...with a writable scratch space
+
 services:
   db:
-    image: postgres:16-alpine
+    image: postgres:16.4-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-taskpilot}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taskpilot}
@@ -16,14 +36,20 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
     restart: unless-stopped
 
   # One-shot: create/upgrade the schema, then exit. API + worker wait for it.
   migrate:
     build: .
     command: ["alembic", "upgrade", "head"]
+    <<: *hardening
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://taskpilot:taskpilot@db:5432/taskpilot}
+      <<: *common-env
     depends_on:
       db:
         condition: service_healthy
@@ -32,11 +58,13 @@ services:
   api:
     build: .
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    <<: *hardening
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://taskpilot:taskpilot@db:5432/taskpilot}
-      API_KEY: ${API_KEY:-change-me-in-production}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      <<: *common-env
       MAX_PAYLOAD_BYTES: ${MAX_PAYLOAD_BYTES:-65536}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-20}
     ports:
       - "8000:8000"
     depends_on:
@@ -50,25 +78,46 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
     restart: unless-stopped
 
   worker:
     build: .
     command: ["python", "-m", "app.worker.worker"]
+    <<: *hardening
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://taskpilot:taskpilot@db:5432/taskpilot}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      <<: *common-env
       WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-60}
       MAX_RETRIES: ${MAX_RETRIES:-3}
       RETRY_BACKOFF_BASE_SECONDS: ${RETRY_BACKOFF_BASE_SECONDS:-60}
       WORKER_BATCH_SIZE: ${WORKER_BATCH_SIZE:-20}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+      EXECUTION_TIMEOUT_SECONDS: ${EXECUTION_TIMEOUT_SECONDS:-30}
+      RUNNING_TASK_TIMEOUT_SECONDS: ${RUNNING_TASK_TIMEOUT_SECONDS:-300}
     depends_on:
       db:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    healthcheck:
+      # Worker is alive if it has touched its heartbeat recently (3x poll window).
+      test: ["CMD-SHELL", "python -c \"import os,time,sys; sys.exit(0 if time.time()-os.path.getmtime('/tmp/worker.heartbeat')<180 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     # Give in-flight ticks time to finish on shutdown before SIGKILL.
     stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
     restart: unless-stopped
 
   # Optional bonus dashboard. Not started by default (keeps the core stack lean).
@@ -76,6 +125,9 @@ services:
   frontend:
     build: ./frontend
     profiles: ["frontend"]
+    init: true
+    security_opt:
+      - no-new-privileges:true
     environment:
       # Reached over the compose network; key injected server-side only.
       TASKPILOT_API_URL: http://api:8000
