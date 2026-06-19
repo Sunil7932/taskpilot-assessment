@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
+from app.metrics import tasks_created_total
 from app.models import Task, TaskStatus
 from app.schemas import TaskCreate
 from app.state_machine import can_transition
@@ -55,6 +56,7 @@ async def create_task(session: AsyncSession, data: TaskCreate) -> Task:
                 return existing
         raise
     await session.refresh(task)
+    tasks_created_total.inc()
     return task
 
 

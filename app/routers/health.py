@@ -1,4 +1,5 @@
-"""Health check. Unauthenticated so orchestrators can probe it."""
+"""Health + metrics. Unauthenticated so orchestrators/Prometheus can probe them
+(restrict at the network layer in production)."""
 
 from __future__ import annotations
 
@@ -9,9 +10,17 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_session
+from app.metrics import render_metrics
 
 logger = logging.getLogger("taskpilot.health")
-router = APIRouter(tags=["health"])
+router = APIRouter(tags=["ops"])
+
+
+@router.get("/metrics", include_in_schema=False)
+async def metrics() -> Response:
+    """Prometheus exposition for the API process."""
+    body, content_type = render_metrics()
+    return Response(content=body, media_type=content_type)
 
 
 @router.get("/health/live")

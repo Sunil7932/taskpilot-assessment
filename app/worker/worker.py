@@ -19,6 +19,8 @@ import signal
 import time
 from pathlib import Path
 
+from prometheus_client import start_http_server
+
 from app.config import get_settings
 from app.database import SessionLocal, engine
 from app.logging_config import configure_logging
@@ -59,7 +61,13 @@ async def _loop(stop: asyncio.Event) -> None:
 
 
 async def main() -> None:
-    configure_logging(get_settings().log_level)
+    settings = get_settings()
+    configure_logging(settings.log_level)
+
+    # Expose Prometheus metrics for this (separate) process.
+    start_http_server(settings.worker_metrics_port)
+    logger.info("worker_metrics_server_started", extra={"port": settings.worker_metrics_port})
+
     stop = asyncio.Event()
 
     loop = asyncio.get_running_loop()

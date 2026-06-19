@@ -28,6 +28,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
+from app.metrics import tasks_processed_total, tasks_reclaimed_total
 from app.models import Task, TaskStatus
 from app.worker.executor import execute_task
 
@@ -53,6 +54,7 @@ def _apply_failure(task: Task, error: str, settings: Settings) -> None:
     task.last_error = error[:1000]  # bounded so a noisy downstream can't bloat the row
     if attempt > settings.max_retries:
         task.status = TaskStatus.dead
+        tasks_processed_total.labels(outcome="dead").inc()
         logger.warning(
             "task_dead_lettered",
             extra={"task_id": str(task.id), "retry_count": task.retry_count},
@@ -62,6 +64,7 @@ def _apply_failure(task: Task, error: str, settings: Settings) -> None:
         task.retry_count = attempt
         task.status = TaskStatus.pending
         task.scheduled_at = _now() + timedelta(seconds=delay)
+        tasks_processed_total.labels(outcome="retried").inc()
         logger.info(
             "task_retry_scheduled",
             extra={"task_id": str(task.id), "attempt": attempt, "retry_in_seconds": delay},
@@ -81,6 +84,7 @@ async def reclaim_stale_running(session: AsyncSession, settings: Settings) -> in
         stale = list((await session.execute(stmt)).scalars().all())
         for task in stale:
             logger.warning("task_reclaimed_stale", extra={"task_id": str(task.id)})
+            tasks_reclaimed_total.inc()
             _apply_failure(task, "execution stalled (worker lost or exceeded timeout)", settings)
     return len(stale)
 

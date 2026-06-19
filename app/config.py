@@ -53,9 +53,15 @@ class Settings(BaseSettings):
     # is reclaimed by the reaper and retried/dead-lettered.
     running_task_timeout_seconds: int = Field(default=300, alias="RUNNING_TASK_TIMEOUT_SECONDS")
 
+    # Port the worker process exposes its Prometheus metrics on.
+    worker_metrics_port: int = Field(default=9100, alias="WORKER_METRICS_PORT")
+
     # App
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     max_payload_bytes: int = Field(default=65536, alias="MAX_PAYLOAD_BYTES")
+    # Hard ceiling on the whole request body (Content-Length); rejected with 413
+    # before the body is read, to bound memory use. Generous vs max_payload_bytes.
+    max_request_bytes: int = Field(default=1_048_576, alias="MAX_REQUEST_BYTES")
     title_max_length: int = 255
 
     @property
