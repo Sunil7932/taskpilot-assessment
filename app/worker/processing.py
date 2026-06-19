@@ -141,6 +141,7 @@ async def process_claimed_task(session: AsyncSession, task_id, settings: Setting
             return
         task.status = TaskStatus.succeeded
         task.last_error = None
+    tasks_processed_total.labels(outcome="succeeded").inc()
     logger.info("task_succeeded", extra={"task_id": str(task_id)})
 
 
