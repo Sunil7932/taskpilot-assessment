@@ -37,6 +37,8 @@ class TaskCreate(BaseModel):
     title: TitleStr
     payload: dict[str, Any] = Field(default_factory=dict)
     scheduled_at: datetime | None = None
+    # Optional dedupe token so a client safely retrying a create won't duplicate.
+    idempotency_key: str | None = Field(default=None, max_length=255)
 
     @field_validator("title")
     @classmethod
@@ -73,6 +75,7 @@ class TaskRead(BaseModel):
     id: uuid.UUID
     title: str
     payload: dict[str, Any]
+    idempotency_key: str | None
     scheduled_at: datetime
     status: TaskStatus
     retry_count: int

@@ -6,7 +6,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, Enum, Index, Integer, String, Text, func
+from sqlalchemy import CheckConstraint, DateTime, Enum, Index, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -30,6 +30,9 @@ class Task(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     # JSONB: untrusted, schema-validated at the API boundary (see schemas.py).
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # Optional client-supplied dedupe key: a retried create with the same key
+    # returns the original task instead of creating a duplicate (see service.py).
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     scheduled_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -58,5 +61,12 @@ class Task(Base):
             "ix_tasks_status_scheduled_at",
             "status",
             "scheduled_at",
+        ),
+        # Enforce dedupe at the DB level (the source of truth under concurrency).
+        Index(
+            "uq_tasks_idempotency_key",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("idempotency_key IS NOT NULL"),
         ),
     )
