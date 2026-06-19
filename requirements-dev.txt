@@ -5,3 +5,5 @@ pytest-asyncio==0.25.0
 httpx==0.28.1
 ruff==0.8.4
 black==24.10.0
+# Used only by task_service_fixed.py (the §7 review fix demonstration).
+aiosqlite==0.20.0
