@@ -49,8 +49,17 @@ curl -X POST localhost:8000/tasks -H "X-API-Key: $KEY" \
   -H 'Content-Type: application/json' \
   -d '{"title":"flaky","payload":{"force_fail":true}}'
 
+# idempotent create — sending this twice returns the SAME task, no duplicate
+curl -X POST localhost:8000/tasks -H "X-API-Key: $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"charge card","payload":{"amt":5},"idempotency_key":"order-999"}'
+
 # list (filter + paginate)
 curl "localhost:8000/tasks?status=pending&limit=20&offset=0" -H "X-API-Key: $KEY"
+
+# liveness (no DB) vs readiness (probes DB) — both unauthenticated
+curl localhost:8000/health/live
+curl localhost:8000/health
 ```
 
 Interactive API docs: http://localhost:8000/docs
@@ -73,7 +82,8 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-CI runs lint (ruff + black) → tests (against a Postgres service) → image build.
+CI runs lint (ruff + black + mypy) → tests (against a Postgres service, incl.
+`alembic check` for migration drift) → image build.
 
 ---
 
@@ -145,7 +155,9 @@ task_service_fixed.py + CODE_REVIEW.md   §7 review exercise
 | **Backoff** | Exponential (`base · 2^attempt`, base 60s) | Flaky downstreams recover better when not hammered; exponential spacing (60s → 120s → 240s) backs off fast without extra infra. |
 | **Concurrency** | `FOR UPDATE SKIP LOCKED` claim, status flipped to `running` in one txn | Multiple workers run the same claim query and each gets a disjoint row set, so no task is ever executed twice; execution happens outside the lock so slow I/O doesn't hold rows. |
 | **Dead-letter** | `status = 'dead'` on the same table | A separate DLQ table adds migration/ops overhead with no benefit at this scale; a terminal status is queryable and simple. Easy to split out later. |
-| **Migrations** | Alembic (async env) | Production-realistic, reproducible schema; CI verifies migrations apply cleanly. |
+| **Crash recovery** | Reaper reclaims stale `running` tasks | A worker can die mid-task; without this the task is stuck forever. The reaper makes the system self-heal. |
+| **Idempotency** | Optional `idempotency_key` + partial unique index | Other services retry create calls; the key dedupes so a retry returns the original task instead of duplicating work. |
+| **Migrations** | Alembic (async env) | Production-realistic, reproducible schema; CI verifies migrations apply *and* checks model drift (`alembic check`). |
 
 ### Status state machine
 
@@ -182,12 +194,25 @@ a PATCH racing the worker) can't clobber each other.
 
 ## Production-readiness notes
 
-- Multi-stage **Dockerfile**, lean `python:3.12-slim` runtime, **non-root** user, pinned base images.
-- **Healthcheck** endpoint (`/health`, probes DB) wired into the compose healthcheck.
-- **Graceful shutdown**: the worker traps SIGTERM/SIGINT, finishes the in-flight tick, then disposes the engine (`stop_grace_period: 30s`).
-- **No secrets in the repo**: `.env` is git-ignored; everything is env-configurable (`.env.example` documents every variable).
-- **Structured JSON logs** for both API and worker.
-- Generic client-facing errors; stack traces/SQL never leak.
+**Reliability / self-healing**
+- **Stale-task reaper**: if a worker dies mid-execution, its task would be stuck in `running` forever. Each tick first reclaims tasks `running` past `RUNNING_TASK_TIMEOUT_SECONDS` and retries/dead-letters them. *(see `reclaim_stale_running`)*
+- **Per-task execution timeout** (`EXECUTION_TIMEOUT_SECONDS`): a hung task can't block the worker — it's treated as a failure and retried.
+- **Idempotent create**: clients may send `idempotency_key`; a retried create returns the original task instead of duplicating. Enforced by a DB **partial unique index** (the real guard under concurrency), with the insert race handled gracefully.
+- **Bounded concurrent processing** (`WORKER_CONCURRENCY`): claimed tasks execute concurrently with a semaphore cap, so throughput scales without unbounded DB sessions.
+- **Connection-pool tuning**: `pool_pre_ping` + `pool_recycle` + configurable sizes survive DB restarts and stale connections.
+
+**Security**
+- **Fail-closed config**: with `ENVIRONMENT=production`, the app **refuses to start** if `API_KEY` is the insecure default.
+- Timing-safe API-key comparison; **non-sequential UUIDs** (no IDOR enumeration); untrusted `payload` validated for shape + size; unknown fields rejected.
+- **Container hardening**: non-root user, `read_only` root filesystem (+ tmpfs `/tmp`), `cap_drop: ALL`, `no-new-privileges`, `init: true` for correct signal handling/zombie reaping.
+- **No secrets in the repo**: `.env` git-ignored; everything env-configurable (`.env.example` documents every variable).
+
+**Operability**
+- **Liveness** (`/health/live`, no deps) vs **readiness** (`/health`, probes DB) — so an orchestrator won't kill a healthy pod over a transient DB blip. The worker exposes a **heartbeat-file healthcheck**.
+- **Graceful shutdown**: worker traps SIGTERM/SIGINT, finishes the in-flight tick, disposes the engine (`stop_grace_period: 30s`); uvicorn drains on signal.
+- **Structured JSON logs** with a request-id **contextvar** so every log line in a request (not just the access log) is correlated; generic client errors, never leaking stack traces/SQL.
+- **Resource limits** (cpu/memory) per service; multi-stage lean image with version-pinned bases.
+- **CI gates**: ruff + black + **mypy**, tests on a real Postgres, **`alembic check`** (model/migration drift), and image build.
 
 ---
 
@@ -195,6 +220,7 @@ a PATCH racing the worker) can't clobber each other.
 
 - **No DLQ table** — a `dead` status is enough at this size (documented above).
 - **No update/edit endpoint** beyond status — not in the spec; tasks are created then driven by the worker.
+- **No metrics endpoint (Prometheus)** — logs cover it at this size; called out in the scale section as the next step.
 - The optional frontend is deliberately minimal (polling, no client cache library) — the brief rewards state-management restraint.
 
 ---
