@@ -1,0 +1,91 @@
+# Single-command stack: `docker compose up --build`.
+# Brings up Postgres, applies migrations, then starts the API + worker.
+# All settings fall back to safe local defaults; override via a .env file.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-taskpilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taskpilot}
+      POSTGRES_DB: ${POSTGRES_DB:-taskpilot}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-taskpilot} -d ${POSTGRES_DB:-taskpilot}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # One-shot: create/upgrade the schema, then exit. API + worker wait for it.
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://taskpilot:taskpilot@db:5432/taskpilot}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://taskpilot:taskpilot@db:5432/taskpilot}
+      API_KEY: ${API_KEY:-change-me-in-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MAX_PAYLOAD_BYTES: ${MAX_PAYLOAD_BYTES:-65536}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker.worker"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://taskpilot:taskpilot@db:5432/taskpilot}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-60}
+      MAX_RETRIES: ${MAX_RETRIES:-3}
+      RETRY_BACKOFF_BASE_SECONDS: ${RETRY_BACKOFF_BASE_SECONDS:-60}
+      WORKER_BATCH_SIZE: ${WORKER_BATCH_SIZE:-20}
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # Give in-flight ticks time to finish on shutdown before SIGKILL.
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  # Optional bonus dashboard. Not started by default (keeps the core stack lean).
+  # Run with: docker compose --profile frontend up --build
+  frontend:
+    build: ./frontend
+    profiles: ["frontend"]
+    environment:
+      # Reached over the compose network; key injected server-side only.
+      TASKPILOT_API_URL: http://api:8000
+      TASKPILOT_API_KEY: ${API_KEY:-change-me-in-production}
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
