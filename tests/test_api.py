@@ -115,6 +115,13 @@ async def test_liveness_is_public(client):
     assert resp.json()["status"] == "ok"
 
 
+async def test_root_returns_service_info(client):
+    resp = await client.get("/", headers={"X-API-Key": ""})
+    assert resp.status_code == 200
+    assert resp.json()["service"] == "TaskPilot"
+    assert resp.json()["docs"] == "/docs"
+
+
 async def test_idempotency_key_returns_same_task(client):
     body = {"title": "charge card", "payload": {"amount": 10}, "idempotency_key": "abc-123"}
     first = await client.post("/tasks", json=body)

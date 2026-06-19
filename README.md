@@ -138,7 +138,8 @@ cd taskpilot-assessment
 docker compose up --build
 ```
 Wait ~20s. You'll see the database start, migrations run, and the API report
-`api_startup_complete`. The API is now live at **http://localhost:8000**.
+`api_startup_complete`. The API is now live — open the interactive docs at
+**http://localhost:8000/docs** (the bare root `/` just returns a small links blob).
 
 **Step 3 — open the interactive docs**
 

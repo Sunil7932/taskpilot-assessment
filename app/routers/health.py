@@ -16,6 +16,18 @@ logger = logging.getLogger("taskpilot.health")
 router = APIRouter(tags=["ops"])
 
 
+@router.get("/", include_in_schema=False)
+async def root() -> dict[str, str]:
+    """Friendly landing response so the base URL isn't a bare 404."""
+    return {
+        "service": "TaskPilot",
+        "status": "ok",
+        "docs": "/docs",
+        "health": "/health",
+        "metrics": "/metrics",
+    }
+
+
 @router.get("/metrics", include_in_schema=False)
 async def metrics() -> Response:
     """Prometheus exposition for the API process."""
