@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     cors_allow_origins: str = Field(default="", alias="CORS_ALLOW_ORIGINS")
 
     # Worker
+    # Per the brief (§5.1) the worker runs inside the API container by default
+    # (started as a background task in the app lifespan). Set false to run it as
+    # a standalone process instead (e.g. to scale it out — see README).
+    run_worker: bool = Field(default=True, alias="RUN_WORKER")
     worker_poll_interval_seconds: int = Field(default=60, alias="WORKER_POLL_INTERVAL_SECONDS")
     max_retries: int = Field(default=3, alias="MAX_RETRIES")
     retry_backoff_base_seconds: int = Field(default=60, alias="RETRY_BACKOFF_BASE_SECONDS")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -9,10 +10,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import INSECURE_DEFAULT_API_KEY, get_settings
+from app.database import SessionLocal
 from app.errors import register_exception_handlers
 from app.logging_config import configure_logging
 from app.middleware import RequestLoggingMiddleware
 from app.routers import health, tasks
+from app.worker.runner import run_loop
 
 logger = logging.getLogger("taskpilot.app")
 
@@ -28,9 +31,26 @@ async def lifespan(_: FastAPI):
             "insecure_api_key_in_use",
             extra={"hint": "Set a strong API_KEY before deploying to production."},
         )
+
+    # §5.1: the worker runs inside the API container, started by the same
+    # `docker compose up`. It's a background task on the app event loop and is
+    # shut down gracefully (the in-flight tick finishes) when the app stops.
+    worker_stop: asyncio.Event | None = None
+    worker_task: asyncio.Task[None] | None = None
+    if settings.run_worker:
+        worker_stop = asyncio.Event()
+        worker_task = asyncio.create_task(run_loop(worker_stop, SessionLocal, settings))
+        logger.info("in_process_worker_started")
+
     logger.info("api_startup_complete", extra={"environment": settings.environment})
-    yield
-    logger.info("api_shutdown_complete")
+    try:
+        yield
+    finally:
+        if worker_stop is not None and worker_task is not None:
+            worker_stop.set()
+            await worker_task  # let the current tick drain before exiting
+            logger.info("in_process_worker_stopped")
+        logger.info("api_shutdown_complete")
 
 
 def create_app() -> FastAPI:

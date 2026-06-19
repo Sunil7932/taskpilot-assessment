@@ -55,6 +55,8 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # The API container also runs the background worker in-process (§5.1),
+  # started by the same `docker compose up`.
   api:
     build: .
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -66,6 +68,15 @@ services:
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-}
       DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
       DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-20}
+      # In-process worker tuning (set RUN_WORKER=false to run it separately).
+      RUN_WORKER: ${RUN_WORKER:-true}
+      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-60}
+      MAX_RETRIES: ${MAX_RETRIES:-3}
+      RETRY_BACKOFF_BASE_SECONDS: ${RETRY_BACKOFF_BASE_SECONDS:-60}
+      WORKER_BATCH_SIZE: ${WORKER_BATCH_SIZE:-20}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+      EXECUTION_TIMEOUT_SECONDS: ${EXECUTION_TIMEOUT_SECONDS:-30}
+      RUNNING_TASK_TIMEOUT_SECONDS: ${RUNNING_TASK_TIMEOUT_SECONDS:-300}
     ports:
       - "8000:8000"
     depends_on:
@@ -79,44 +90,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-    stop_grace_period: 30s
-    deploy:
-      resources:
-        limits:
-          cpus: "1.0"
-          memory: 512M
-    restart: unless-stopped
-
-  worker:
-    build: .
-    command: ["python", "-m", "app.worker.worker"]
-    <<: *hardening
-    environment:
-      <<: *common-env
-      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-60}
-      MAX_RETRIES: ${MAX_RETRIES:-3}
-      RETRY_BACKOFF_BASE_SECONDS: ${RETRY_BACKOFF_BASE_SECONDS:-60}
-      WORKER_BATCH_SIZE: ${WORKER_BATCH_SIZE:-20}
-      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
-      EXECUTION_TIMEOUT_SECONDS: ${EXECUTION_TIMEOUT_SECONDS:-30}
-      RUNNING_TASK_TIMEOUT_SECONDS: ${RUNNING_TASK_TIMEOUT_SECONDS:-300}
-      WORKER_METRICS_PORT: ${WORKER_METRICS_PORT:-9100}
-    ports:
-      # Prometheus scrape target for the worker process.
-      - "9100:9100"
-    depends_on:
-      db:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
-    healthcheck:
-      # Worker is alive if it has touched its heartbeat recently (3x poll window).
-      test: ["CMD-SHELL", "python -c \"import os,time,sys; sys.exit(0 if time.time()-os.path.getmtime('/tmp/worker.heartbeat')<180 else 1)\""]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-    # Give in-flight ticks time to finish on shutdown before SIGKILL.
     stop_grace_period: 30s
     deploy:
       resources:

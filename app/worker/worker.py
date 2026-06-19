@@ -1,13 +1,13 @@
-"""Worker entrypoint: a plain asyncio polling loop.
+"""Standalone worker entrypoint.
 
-Why a plain loop (not APScheduler/Celery)? We have exactly one periodic job
-(scan every N seconds). A bare ``asyncio`` loop is the lightest thing that
-satisfies the brief: zero extra dependencies, no broker, and graceful shutdown
-is trivial — we cancel the inter-tick sleep on SIGTERM but always let the
-in-flight tick finish first.
+By default the worker runs *inside the API container* (see app.main lifespan),
+which is the literal §5.1 requirement. This module lets you instead run the
+worker as its own process — useful to scale it out independently (set
+RUN_WORKER=false on the API and run `python -m app.worker.worker`).
 
-Liveness: after every tick the loop touches a heartbeat file. A container
-healthcheck can assert the file is recent to detect a wedged/dead worker.
+Liveness: after every tick the loop touches a heartbeat file so a container
+healthcheck can detect a wedged worker. It also exposes its own Prometheus
+metrics server (the in-process worker shares the API's /metrics instead).
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ import asyncio
 import logging
 import os
 import signal
-import time
 from pathlib import Path
 
 from prometheus_client import start_http_server
@@ -24,7 +23,7 @@ from prometheus_client import start_http_server
 from app.config import get_settings
 from app.database import SessionLocal, engine
 from app.logging_config import configure_logging
-from app.worker.processing import run_once
+from app.worker.runner import run_loop
 
 logger = logging.getLogger("taskpilot.worker")
 
@@ -38,44 +37,20 @@ def _beat() -> None:
         logger.warning("heartbeat_write_failed", extra={"path": str(HEARTBEAT_FILE)})
 
 
-async def _loop(stop: asyncio.Event) -> None:
-    settings = get_settings()
-    interval = settings.worker_poll_interval_seconds
-    logger.info("worker_started", extra={"poll_interval_seconds": interval})
-    _beat()
-
-    while not stop.is_set():
-        start = time.monotonic()
-        try:
-            await run_once(SessionLocal, settings)
-        except Exception:  # noqa: BLE001 — never let one tick kill the loop
-            logger.exception("worker_tick_failed")
-        _beat()
-
-        # Sleep the remainder of the interval, but wake immediately on shutdown.
-        elapsed = time.monotonic() - start
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=max(0.0, interval - elapsed))
-        except TimeoutError:
-            pass
-
-
 async def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
 
-    # Expose Prometheus metrics for this (separate) process.
     start_http_server(settings.worker_metrics_port)
     logger.info("worker_metrics_server_started", extra={"port": settings.worker_metrics_port})
 
     stop = asyncio.Event()
-
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
 
     try:
-        await _loop(stop)
+        await run_loop(stop, SessionLocal, settings, on_tick=_beat)
     finally:
         logger.info("worker_shutting_down")
         await engine.dispose()
