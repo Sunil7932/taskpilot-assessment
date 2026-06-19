@@ -1,0 +1,24 @@
+[project]
+name = "taskpilot"
+version = "0.1.0"
+description = "TaskPilot — a small background-job service (API + scheduled worker)."
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, isort, bugbear, comprehensions, pyupgrade.
+select = ["E", "F", "I", "B", "C4", "UP"]
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+extend-exclude = "alembic/versions"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning"]
