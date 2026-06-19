@@ -107,3 +107,28 @@ async def test_health_is_public(client):
     resp = await client.get("/health", headers={"X-API-Key": ""})
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+
+
+async def test_liveness_is_public(client):
+    resp = await client.get("/health/live", headers={"X-API-Key": ""})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+
+
+async def test_idempotency_key_returns_same_task(client):
+    body = {"title": "charge card", "payload": {"amount": 10}, "idempotency_key": "abc-123"}
+    first = await client.post("/tasks", json=body)
+    second = await client.post("/tasks", json=body)
+    assert first.status_code == 201
+    assert second.status_code == 201
+    # Same task returned, not a duplicate.
+    assert first.json()["id"] == second.json()["id"]
+    listing = await client.get("/tasks")
+    keyed = [t for t in listing.json()["items"] if t["idempotency_key"] == "abc-123"]
+    assert len(keyed) == 1
+
+
+async def test_different_idempotency_keys_create_distinct_tasks(client):
+    a = await client.post("/tasks", json={"title": "t", "idempotency_key": "k1"})
+    b = await client.post("/tasks", json={"title": "t", "idempotency_key": "k2"})
+    assert a.json()["id"] != b.json()["id"]

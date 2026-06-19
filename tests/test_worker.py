@@ -10,7 +10,7 @@ import pytest
 
 from app.config import get_settings
 from app.models import Task, TaskStatus
-from app.worker.processing import backoff_delay_seconds, run_once
+from app.worker.processing import backoff_delay_seconds, reclaim_stale_running, run_once
 
 
 @pytest.fixture
@@ -93,3 +93,39 @@ def test_backoff_is_exponential():
     assert backoff_delay_seconds(1, 60) == 60
     assert backoff_delay_seconds(2, 60) == 120
     assert backoff_delay_seconds(3, 60) == 240
+
+
+async def test_execution_timeout_is_treated_as_failure(session_factory, settings):
+    # Force the per-task timeout below the simulated work (0.5s) so it trips.
+    tight = settings.model_copy(update={"execution_timeout_seconds": 0})
+    task_id = await _insert(session_factory)  # normal task, would otherwise succeed
+    await run_once(session_factory, tight)
+    task = await _get(session_factory, task_id)
+    assert task.status == TaskStatus.pending  # requeued for retry
+    assert task.retry_count == 1
+    assert "timeout" in (task.last_error or "")
+
+
+async def test_reaper_reclaims_stale_running_task(session_factory, settings):
+    # A task left in `running` long ago (e.g. its worker crashed mid-flight).
+    stale_since = datetime.now(UTC) - timedelta(seconds=settings.running_task_timeout_seconds + 60)
+    task_id = await _insert(session_factory, status=TaskStatus.running, updated_at=stale_since)
+    async with session_factory() as session:
+        reclaimed = await reclaim_stale_running(session, settings)
+    assert reclaimed == 1
+    task = await _get(session_factory, task_id)
+    assert task.status == TaskStatus.pending  # back in the queue
+    assert task.retry_count == 1
+    assert "stalled" in (task.last_error or "")
+
+
+async def test_reaper_ignores_fresh_running_task(session_factory, settings):
+    # A task that just started running must NOT be reaped.
+    task_id = await _insert(
+        session_factory, status=TaskStatus.running, updated_at=datetime.now(UTC)
+    )
+    async with session_factory() as session:
+        reclaimed = await reclaim_stale_running(session, settings)
+    assert reclaimed == 0
+    task = await _get(session_factory, task_id)
+    assert task.status == TaskStatus.running
