@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -26,9 +26,7 @@ def _validate_payload(value: dict[str, Any]) -> dict[str, Any]:
     # Bound the serialised size to prevent oversized-payload abuse / DoS.
     encoded = json.dumps(value, separators=(",", ":"), default=str)
     if len(encoded.encode("utf-8")) > _settings.max_payload_bytes:
-        raise ValueError(
-            f"payload exceeds maximum size of {_settings.max_payload_bytes} bytes"
-        )
+        raise ValueError(f"payload exceeds maximum size of {_settings.max_payload_bytes} bytes")
     return value
 
 
@@ -60,8 +58,8 @@ class TaskCreate(BaseModel):
             return None
         # Normalise naive datetimes to UTC; store everything tz-aware.
         if v.tzinfo is None:
-            return v.replace(tzinfo=timezone.utc)
-        return v.astimezone(timezone.utc)
+            return v.replace(tzinfo=UTC)
+        return v.astimezone(UTC)
 
 
 class TaskStatusUpdate(BaseModel):

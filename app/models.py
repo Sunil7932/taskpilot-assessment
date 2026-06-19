@@ -26,9 +26,7 @@ class Task(Base):
 
     # UUID v4: globally unique, generated server-side without DB coordination,
     # and non-sequential so task ids can't be enumerated (mitigates IDOR).
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     # JSONB: untrusted, schema-validated at the API boundary (see schemas.py).
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)

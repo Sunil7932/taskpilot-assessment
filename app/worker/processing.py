@@ -16,7 +16,7 @@ other worker will pick it up.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -29,7 +29,7 @@ logger = logging.getLogger("taskpilot.worker")
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def backoff_delay_seconds(attempt: int, base: int) -> int:
@@ -55,39 +55,47 @@ async def claim_due_tasks(session: AsyncSession, limit: int) -> list[Task]:
     return tasks
 
 
-async def process_claimed_task(
-    session: AsyncSession, task_id, settings: Settings
-) -> None:
-    """Execute one already-claimed (running) task and record the outcome."""
-    # Re-load inside its own session; the object was detached after claim commit.
-    task = await session.get(Task, task_id)
-    if task is None or task.status != TaskStatus.running:
-        return
+async def process_claimed_task(session: AsyncSession, task_id, settings: Settings) -> None:
+    """Execute one already-claimed (running) task and record the outcome.
+
+    The payload is read inside a transaction (async sessions cannot lazy-load
+    attributes outside one); execution then runs with no DB transaction/lock
+    held; the result is written in a fresh transaction.
+    """
+    async with session.begin():
+        task = await session.get(Task, task_id)
+        if task is None or task.status != TaskStatus.running:
+            return
+        payload = task.payload
 
     try:
-        await execute_task(task)
+        await execute_task(payload)
     except Exception as exc:  # noqa: BLE001 — convert any failure into retry/DLQ
-        await _record_failure(session, task, str(exc), settings)
+        await _record_failure(session, task_id, str(exc), settings)
         return
 
     async with session.begin():
+        task = await session.get(Task, task_id)
+        if task is None:
+            return
         task.status = TaskStatus.succeeded
         task.last_error = None
-    logger.info("task_succeeded", extra={"task_id": str(task.id)})
+    logger.info("task_succeeded", extra={"task_id": str(task_id)})
 
 
-async def _record_failure(
-    session: AsyncSession, task: Task, error: str, settings: Settings
-) -> None:
-    attempt = task.retry_count + 1
+async def _record_failure(session: AsyncSession, task_id, error: str, settings: Settings) -> None:
     async with session.begin():
+        task = await session.get(Task, task_id)
+        if task is None:
+            return
+        attempt = task.retry_count + 1
         # Keep error messages bounded so a noisy downstream can't bloat the row.
         task.last_error = error[:1000]
         if attempt > settings.max_retries:
             task.status = TaskStatus.dead
             logger.warning(
                 "task_dead_lettered",
-                extra={"task_id": str(task.id), "retry_count": task.retry_count},
+                extra={"task_id": str(task_id), "retry_count": task.retry_count},
             )
         else:
             delay = backoff_delay_seconds(attempt, settings.retry_backoff_base_seconds)
@@ -97,7 +105,7 @@ async def _record_failure(
             logger.info(
                 "task_retry_scheduled",
                 extra={
-                    "task_id": str(task.id),
+                    "task_id": str(task_id),
                     "attempt": attempt,
                     "retry_in_seconds": delay,
                 },

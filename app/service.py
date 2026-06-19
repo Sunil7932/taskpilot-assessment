@@ -54,10 +54,10 @@ async def list_tasks(
 
     total = (await session.execute(count_q)).scalar_one()
     rows = (
-        await session.execute(
-            base.order_by(Task.created_at.desc()).limit(limit).offset(offset)
-        )
-    ).scalars().all()
+        (await session.execute(base.order_by(Task.created_at.desc()).limit(limit).offset(offset)))
+        .scalars()
+        .all()
+    )
     return list(rows), total
 
 
@@ -67,18 +67,14 @@ async def delete_task(session: AsyncSession, task_id: uuid.UUID) -> None:
     await session.commit()
 
 
-async def update_status(
-    session: AsyncSession, task_id: uuid.UUID, target: TaskStatus
-) -> Task:
+async def update_status(session: AsyncSession, task_id: uuid.UUID, target: TaskStatus) -> Task:
     """Apply a status transition under a row lock to prevent lost updates.
 
     Two concurrent PATCHes (or a PATCH racing the worker) serialise on the row;
     the second sees the post-commit state and is validated against it.
     """
     async with session.begin():
-        result = await session.execute(
-            select(Task).where(Task.id == task_id).with_for_update()
-        )
+        result = await session.execute(select(Task).where(Task.id == task_id).with_for_update())
         task = result.scalar_one_or_none()
         if task is None:
             raise ApiError(404, "not_found", "Task not found.")

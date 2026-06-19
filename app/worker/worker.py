@@ -38,7 +38,7 @@ async def _loop(stop: asyncio.Event) -> None:
         elapsed = time.monotonic() - start
         try:
             await asyncio.wait_for(stop.wait(), timeout=max(0.0, interval - elapsed))
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
 

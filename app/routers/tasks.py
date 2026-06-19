@@ -21,9 +21,7 @@ router = APIRouter(
 
 
 @router.post("", response_model=TaskRead, status_code=status.HTTP_201_CREATED)
-async def create_task(
-    data: TaskCreate, session: AsyncSession = Depends(get_session)
-) -> TaskRead:
+async def create_task(data: TaskCreate, session: AsyncSession = Depends(get_session)) -> TaskRead:
     task = await service.create_task(session, data)
     return TaskRead.model_validate(task)
 
@@ -45,9 +43,7 @@ async def list_tasks(
 
 
 @router.get("/{task_id}", response_model=TaskRead)
-async def get_task(
-    task_id: uuid.UUID, session: AsyncSession = Depends(get_session)
-) -> TaskRead:
+async def get_task(task_id: uuid.UUID, session: AsyncSession = Depends(get_session)) -> TaskRead:
     task = await service.get_task(session, task_id)
     return TaskRead.model_validate(task)
 
@@ -63,8 +59,6 @@ async def update_task_status(
 
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_task(
-    task_id: uuid.UUID, session: AsyncSession = Depends(get_session)
-) -> Response:
+async def delete_task(task_id: uuid.UUID, session: AsyncSession = Depends(get_session)) -> Response:
     await service.delete_task(session, task_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

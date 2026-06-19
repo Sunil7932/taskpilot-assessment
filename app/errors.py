@@ -44,16 +44,13 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def _handle_validation(_: Request, exc: RequestValidationError) -> JSONResponse:
         # Surface *what* failed (field + reason) without echoing internals.
         details = "; ".join(
-            f"{'.'.join(str(p) for p in e['loc'] if p != 'body')}: {e['msg']}"
-            for e in exc.errors()
+            f"{'.'.join(str(p) for p in e['loc'] if p != 'body')}: {e['msg']}" for e in exc.errors()
         )
         return _envelope(422, "validation_error", details or "Invalid request.")
 
     @app.exception_handler(StarletteHTTPException)
     async def _handle_http(_: Request, exc: StarletteHTTPException) -> JSONResponse:
-        code = {404: "not_found", 405: "method_not_allowed"}.get(
-            exc.status_code, "http_error"
-        )
+        code = {404: "not_found", 405: "method_not_allowed"}.get(exc.status_code, "http_error")
         message = exc.detail if isinstance(exc.detail, str) else "Request failed."
         return _envelope(exc.status_code, code, message)
 

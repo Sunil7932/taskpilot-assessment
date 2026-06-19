@@ -13,6 +13,14 @@ extend-exclude = ["alembic/versions"]
 # pycodestyle, pyflakes, isort, bugbear, comprehensions, pyupgrade.
 select = ["E", "F", "I", "B", "C4", "UP"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection idiom puts these calls in argument defaults.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Security",
+]
+
 [tool.black]
 line-length = 100
 target-version = ["py312"]
@@ -20,5 +28,7 @@ extend-exclude = "alembic/versions"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["."]
 testpaths = ["tests"]
 filterwarnings = ["error::DeprecationWarning"]
