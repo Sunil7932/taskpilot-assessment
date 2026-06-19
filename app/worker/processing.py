@@ -3,18 +3,24 @@
 Separated from the scheduler loop so it can be unit-tested directly with a real
 database session.
 
-Concurrency model
------------------
-Claiming uses ``SELECT ... FOR UPDATE SKIP LOCKED`` inside a transaction and
-flips ``pending -> running`` atomically. Any number of workers can run the same
-query concurrently: each gets a disjoint set of rows, so no task is executed
-twice. Execution itself happens *outside* the lock (we don't want to hold a row
-lock for the duration of slow I/O); since the row is already ``running`` no
-other worker will pick it up.
+Concurrency & reliability model
+-------------------------------
+* **Claiming** uses ``SELECT ... FOR UPDATE SKIP LOCKED`` inside a transaction
+  and flips ``pending -> running`` atomically. Any number of workers can run the
+  same query concurrently: each gets a disjoint set of rows, so no task is
+  executed twice. Execution happens *outside* the lock (we don't hold a row lock
+  across slow I/O); the row is already ``running`` so no other worker picks it up.
+* **Execution timeout**: each task is bounded by ``execution_timeout_seconds`` so
+  a single hung task can't block a worker forever.
+* **Reaper**: if a worker crashes mid-execution, its task would otherwise be
+  stuck in ``running`` forever. Before each tick we reclaim tasks that have been
+  ``running`` longer than ``running_task_timeout_seconds`` and retry/dead-letter
+  them — this is the self-healing path that keeps the system live.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
@@ -35,6 +41,48 @@ def _now() -> datetime:
 def backoff_delay_seconds(attempt: int, base: int) -> int:
     """Exponential backoff: base * 2 ** (attempt - 1). attempt is 1-based."""
     return base * (2 ** max(attempt - 1, 0))
+
+
+def _apply_failure(task: Task, error: str, settings: Settings) -> None:
+    """Mutate a task (inside an active transaction) to reflect a failed run.
+
+    Either schedules a backed-off retry or dead-letters it once retries are
+    exhausted. Does not commit — the caller owns the transaction.
+    """
+    attempt = task.retry_count + 1
+    task.last_error = error[:1000]  # bounded so a noisy downstream can't bloat the row
+    if attempt > settings.max_retries:
+        task.status = TaskStatus.dead
+        logger.warning(
+            "task_dead_lettered",
+            extra={"task_id": str(task.id), "retry_count": task.retry_count},
+        )
+    else:
+        delay = backoff_delay_seconds(attempt, settings.retry_backoff_base_seconds)
+        task.retry_count = attempt
+        task.status = TaskStatus.pending
+        task.scheduled_at = _now() + timedelta(seconds=delay)
+        logger.info(
+            "task_retry_scheduled",
+            extra={"task_id": str(task.id), "attempt": attempt, "retry_in_seconds": delay},
+        )
+
+
+async def reclaim_stale_running(session: AsyncSession, settings: Settings) -> int:
+    """Recover tasks stuck in `running` (e.g. their worker crashed)."""
+    cutoff = _now() - timedelta(seconds=settings.running_task_timeout_seconds)
+    stmt = (
+        select(Task)
+        .where(Task.status == TaskStatus.running, Task.updated_at < cutoff)
+        .limit(settings.worker_batch_size)
+        .with_for_update(skip_locked=True)
+    )
+    async with session.begin():
+        stale = list((await session.execute(stmt)).scalars().all())
+        for task in stale:
+            logger.warning("task_reclaimed_stale", extra={"task_id": str(task.id)})
+            _apply_failure(task, "execution stalled (worker lost or exceeded timeout)", settings)
+    return len(stale)
 
 
 async def claim_due_tasks(session: AsyncSession, limit: int) -> list[Task]:
@@ -60,7 +108,8 @@ async def process_claimed_task(session: AsyncSession, task_id, settings: Setting
 
     The payload is read inside a transaction (async sessions cannot lazy-load
     attributes outside one); execution then runs with no DB transaction/lock
-    held; the result is written in a fresh transaction.
+    held, bounded by an execution timeout; the result is written in a fresh
+    transaction.
     """
     async with session.begin():
         task = await session.get(Task, task_id)
@@ -69,7 +118,15 @@ async def process_claimed_task(session: AsyncSession, task_id, settings: Setting
         payload = task.payload
 
     try:
-        await execute_task(payload)
+        await asyncio.wait_for(execute_task(payload), timeout=settings.execution_timeout_seconds)
+    except TimeoutError:
+        await _record_failure(
+            session,
+            task_id,
+            f"execution exceeded {settings.execution_timeout_seconds}s timeout",
+            settings,
+        )
+        return
     except Exception as exc:  # noqa: BLE001 — convert any failure into retry/DLQ
         await _record_failure(session, task_id, str(exc), settings)
         return
@@ -88,42 +145,30 @@ async def _record_failure(session: AsyncSession, task_id, error: str, settings: 
         task = await session.get(Task, task_id)
         if task is None:
             return
-        attempt = task.retry_count + 1
-        # Keep error messages bounded so a noisy downstream can't bloat the row.
-        task.last_error = error[:1000]
-        if attempt > settings.max_retries:
-            task.status = TaskStatus.dead
-            logger.warning(
-                "task_dead_lettered",
-                extra={"task_id": str(task_id), "retry_count": task.retry_count},
-            )
-        else:
-            delay = backoff_delay_seconds(attempt, settings.retry_backoff_base_seconds)
-            task.retry_count = attempt
-            task.status = TaskStatus.pending
-            task.scheduled_at = _now() + timedelta(seconds=delay)
-            logger.info(
-                "task_retry_scheduled",
-                extra={
-                    "task_id": str(task_id),
-                    "attempt": attempt,
-                    "retry_in_seconds": delay,
-                },
-            )
+        _apply_failure(task, error, settings)
 
 
 async def run_once(session_factory: async_sessionmaker[AsyncSession], settings: Settings) -> int:
-    """One worker tick: claim due tasks and process each in isolation.
+    """One worker tick: reap stale tasks, claim due tasks, process concurrently.
 
-    Returns the number of tasks processed (useful for tests/metrics).
+    Returns the number of tasks claimed for execution (useful for tests/metrics).
     """
+    async with session_factory() as session:
+        await reclaim_stale_running(session, settings)
+
     async with session_factory() as session:
         claimed = await claim_due_tasks(session, settings.worker_batch_size)
 
-    for task in claimed:
-        # Each task gets its own session/transaction so one failure can't roll
-        # back another's result.
-        async with session_factory() as session:
-            await process_claimed_task(session, task.id, settings)
+    # Process claimed tasks concurrently, bounded so we don't open an unbounded
+    # number of DB sessions. Each task uses its own session/transaction so one
+    # failure can't roll back another's result.
+    semaphore = asyncio.Semaphore(max(1, settings.worker_concurrency))
+
+    async def _run(task_id) -> None:
+        async with semaphore, session_factory() as session:
+            await process_claimed_task(session, task_id, settings)
+
+    if claimed:
+        await asyncio.gather(*(_run(task.id) for task in claimed))
 
     return len(claimed)

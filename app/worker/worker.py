@@ -5,14 +5,19 @@ Why a plain loop (not APScheduler/Celery)? We have exactly one periodic job
 satisfies the brief: zero extra dependencies, no broker, and graceful shutdown
 is trivial — we cancel the inter-tick sleep on SIGTERM but always let the
 in-flight tick finish first.
+
+Liveness: after every tick the loop touches a heartbeat file. A container
+healthcheck can assert the file is recent to detect a wedged/dead worker.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import time
+from pathlib import Path
 
 from app.config import get_settings
 from app.database import SessionLocal, engine
@@ -21,11 +26,21 @@ from app.worker.processing import run_once
 
 logger = logging.getLogger("taskpilot.worker")
 
+HEARTBEAT_FILE = Path(os.getenv("WORKER_HEARTBEAT_FILE", "/tmp/worker.heartbeat"))
+
+
+def _beat() -> None:
+    try:
+        HEARTBEAT_FILE.touch()
+    except OSError:
+        logger.warning("heartbeat_write_failed", extra={"path": str(HEARTBEAT_FILE)})
+
 
 async def _loop(stop: asyncio.Event) -> None:
     settings = get_settings()
     interval = settings.worker_poll_interval_seconds
     logger.info("worker_started", extra={"poll_interval_seconds": interval})
+    _beat()
 
     while not stop.is_set():
         start = time.monotonic()
@@ -33,6 +48,7 @@ async def _loop(stop: asyncio.Event) -> None:
             await run_once(SessionLocal, settings)
         except Exception:  # noqa: BLE001 — never let one tick kill the loop
             logger.exception("worker_tick_failed")
+        _beat()
 
         # Sleep the remainder of the interval, but wake immediately on shutdown.
         elapsed = time.monotonic() - start
