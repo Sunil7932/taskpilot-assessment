@@ -23,8 +23,9 @@ included.
 9. [Key design decisions](#9-key-design-decisions)
 10. [Scaling it up](#10-scaling-it-up)
 11. [Production-readiness](#11-production-readiness)
-12. [Project layout](#12-project-layout)
-13. [AI usage disclosure](#13-ai-usage-disclosure)
+12. [Frontend dashboard (bonus)](#12-frontend-dashboard)
+13. [Project layout](#13-project-layout)
+14. [AI usage disclosure](#14-ai-usage-disclosure)
 
 ---
 
@@ -357,7 +358,44 @@ Each choice, with the one-line reason:
 
 ---
 
-## 12. Project layout
+## 12. Frontend dashboard
+
+An optional **Next.js (App Router) + TypeScript + TailwindCSS** dashboard lives in
+`frontend/`. Run it with:
+
+```bash
+docker compose --profile frontend up --build   # → http://localhost:3000
+```
+
+What it does:
+- **Task list** with color-coded **status badges** and **pagination** (Previous/Next).
+- **Create-task form** — `title`, `payload` (validated as JSON before submit), and `scheduled_at`.
+- **Live status updates** — polls every 5s (no websockets), so tasks visibly move `pending → running → succeeded`.
+- **Loading / error / empty** states are all handled explicitly.
+
+Design choices the brief calls out:
+- **API integration / security** — the browser never sees the API key. All calls
+  go to Next.js **route handlers** (`app/api/tasks/...`) that run server-side and
+  inject `X-API-Key`. The browser talks only to same-origin `/api/*`.
+- **Folder structure** — `app/` (pages + API routes), `components/` (UI), `lib/`
+  (typed API client + shared types). Small and predictable.
+- **State-management restraint** — plain React `useState`/`useEffect`. No Redux,
+  Zustand, or data-fetching library — none are warranted at this size.
+
+```
+frontend/
+  app/
+    page.tsx                 dashboard page
+    layout.tsx               root layout
+    api/tasks/route.ts       server proxy: GET (list) + POST (create)
+    api/tasks/[id]/route.ts  server proxy: DELETE
+  components/                Dashboard, TaskList, CreateTaskForm, StatusBadge
+  lib/                       api.ts (server-side fetch) + types.ts
+```
+
+---
+
+## 13. Project layout
 
 ```
 app/
@@ -382,7 +420,7 @@ task_service_fixed.py + CODE_REVIEW.md   the §7 code-review exercise
 
 ---
 
-## 13. AI usage disclosure
+## 14. AI usage disclosure
 
 This solution was built with heavy AI assistance (Claude), which the brief
 encourages. Every generated piece was reviewed, corrected, and verified against a
